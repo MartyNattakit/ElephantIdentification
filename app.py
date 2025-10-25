@@ -1,8 +1,22 @@
 import time
 import io
+import base64
 import numpy as np
 from PIL import Image
 import streamlit as st
+import streamlit.components.v1 as components
+import onnxruntime as ort
+
+# =========================
+# CONFIG ส่วนนี้เปลี่ยนชื่อโมเดล/คลาสตามของคุณ
+# =========================
+ONNX_MODEL_PATH = "model.onnx"  # <-- ใส่ชื่อไฟล์โมเดล .onnx ของคุณ
+CLASSES = ["person_1", "person_2", "person_3", "unknown"]  # ต้องตรงกับลำดับ output ของโมเดล
+UNKNOWN_CLASS_NAME = "unknown"
+UNKNOWN_THRESHOLD = 0.60  # <--- ปรับเองตาม validation (0.6 = 60%)
+
+IMG_SIZE = (224, 224)  # ต้องตรงกับตอนเทรน
+
 
 # ========== PAGE CONFIG ==========
 st.set_page_config(
@@ -121,49 +135,197 @@ button[kind="primary"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ========== MODEL LOADING (PLACEHOLDER) ==========
-# TODO: replace with your ONNXRuntime inference session etc.
-# Example:
-# import onnxruntime as ort
-# ort_session = ort.InferenceSession("model.onnx", providers=["CPUExecutionProvider"])
+# ========== โหลดโมเดล ONNX แค่ครั้งเดียว ==========
+@st.cache_resource
+def load_session():
+    return ort.InferenceSession(
+        ONNX_MODEL_PATH,
+        providers=["CPUExecutionProvider"]
+    )
 
-CLASSES = ["person_1", "person_2", "person_3", "unknown"]
+ort_session = load_session()
+
+
+# ========== helper render โมเดล 3D ==========
+def render_3d_viewer(glb_bytes: bytes, height: int = 320):
+    """
+    แสดงโมเดล 3D (.glb / .gltf) ในกล่องหมุนได้ ด้วย three.js
+    glb_bytes: ไฟล์โมเดลแบบ bytes
+    """
+    b64 = base64.b64encode(glb_bytes).decode("utf-8")
+    data_url = f"data:model/gltf-binary;base64,{b64}"
+
+    html_code = f"""
+    <div style="width:100%;height:{height}px;background:#0D1117;border-radius:12px;
+                border:1px solid rgba(255,255,255,0.08);box-shadow:0 20px 60px rgba(0,0,0,0.6);
+                position:relative;overflow:hidden;">
+        <div style="position:absolute;top:0;left:0;width:100%;height:100%;">
+            <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+
+            <canvas id="viewerCanvas" style="width:100%;height:100%;display:block;"></canvas>
+
+            <script>
+            (function() {{
+                const canvas = document.getElementById('viewerCanvas');
+                const renderer = new THREE.WebGLRenderer({{ canvas: canvas, antialias: true, alpha: true }});
+                renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+                const scene = new THREE.Scene();
+                scene.background = null;
+
+                // กล้อง
+                const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+                camera.position.set(0, 1.2, 2.5);
+
+                // แสง
+                const light1 = new THREE.DirectionalLight(0xffffff, 1.2);
+                light1.position.set(2, 2, 2);
+                scene.add(light1);
+
+                const light2 = new THREE.DirectionalLight(0x55aaff, 0.6);
+                light2.position.set(-2, -1, -2);
+                scene.add(light2);
+
+                const amb = new THREE.AmbientLight(0xffffff, 0.4);
+                scene.add(amb);
+
+                // controls หมุน/ซูม
+                const controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enablePan = false;
+                controls.enableZoom = true;
+                controls.target.set(0, 1.0, 0);
+
+                // โหลดโมเดล 3D จาก base64
+                const loader = new THREE.GLTFLoader();
+                loader.load(
+                    '{data_url}',
+                    function(gltf) {{
+                        const model = gltf.scene;
+                        scene.add(model);
+
+                        // auto center / scale
+                        const box = new THREE.Box3().setFromObject(model);
+                        const size = new THREE.Vector3();
+                        const center = new THREE.Vector3();
+                        box.getSize(size);
+                        box.getCenter(center);
+
+                        model.position.x -= center.x;
+                        model.position.y -= center.y;
+                        model.position.z -= center.z;
+
+                        const maxDim = Math.max(size.x, size.y, size.z);
+                        const scale = 1.5 / maxDim;
+                        model.scale.setScalar(scale);
+
+                        controls.update();
+                    }},
+                    undefined,
+                    function(error) {{
+                        console.error("GLB load error:", error);
+                    }}
+                );
+
+                function resizeRenderer() {{
+                    const parent = canvas.parentElement;
+                    const w = parent.clientWidth;
+                    const h = parent.clientHeight;
+                    renderer.setSize(w, h, false);
+                    camera.aspect = w / h;
+                    camera.updateProjectionMatrix();
+                }}
+
+                function animate() {{
+                    requestAnimationFrame(animate);
+                    resizeRenderer();
+                    renderer.render(scene, camera);
+                }}
+                animate();
+            }})();
+            </script>
+        </div>
+    </div>
+    """
+    components.html(html_code, height=height, scrolling=False)
+
+
+# ========== inference functions ==========
+def softmax(x: np.ndarray):
+    # x shape: [1, num_classes] หรือ [num_classes]
+    x = x - np.max(x, axis=-1, keepdims=True)  # ป้องกัน overflow
+    e = np.exp(x)
+    return e / np.sum(e, axis=-1, keepdims=True)
+
+
+def preprocess_image(pil_img: Image.Image):
+    """
+    แปลงรูปเป็นเทนเซอร์ numpy พร้อมเข้า ONNX:
+    - RGB
+    - resize เป็น IMG_SIZE
+    - normalize ด้วย mean/std แบบ ImageNet (แก้ได้ถ้าคุณเทรนด้วยค่าอื่น)
+    - CHW
+    - batch dim
+    """
+    img = pil_img.convert("RGB").resize(IMG_SIZE)
+
+    arr = np.array(img).astype("float32") / 255.0  # [H,W,C] float32 0..1
+
+    # mean/std ถ้าเทรนด้วยค่าอื่นให้ปรับตรงนี้
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    arr = (arr - mean) / std  # normalize
+
+    arr = np.transpose(arr, (2, 0, 1))      # -> [C,H,W]
+    arr = np.expand_dims(arr, axis=0)       # -> [1,C,H,W]
+    arr = arr.astype("float32")
+    return arr
+
 
 def run_inference(pil_img: Image.Image):
     """
-    Your core inference logic.
-    Return a dict:
+    รันโมเดลจริงผ่าน onnxruntime
+    return dict:
     {
-        "pred_class": "person_1" or "unknown",
-        "confidence": 0.82,  # 0-1
-        "topk": [("person_1", 0.82),
-                 ("person_2", 0.12),
-                 ("unknown", 0.06)],
-        "timing_ms": 47.2
+        "pred_class": str,
+        "confidence": float 0..1,
+        "topk": [("class_name", prob_float), ...],
+        "timing_ms": float
     }
     """
     start_t = time.time()
 
-    # 1. preprocess
-    img = pil_img.convert("RGB").resize((224,224))
-    arr = np.array(img).astype("float32") / 255.0
-    arr = np.transpose(arr, (2,0,1))  # [C,H,W]
-    arr = np.expand_dims(arr, axis=0) # [1,C,H,W]
+    # เตรียม input
+    input_tensor = preprocess_image(pil_img)
 
-    # TODO:
-    # outputs = ort_session.run(None, {"input": arr})
-    # probs = softmax(outputs[0]) # shape [1,num_classes]
-    # pretend demo:
-    fake_probs = np.array([0.10, 0.05, 0.03, 0.82])  # last is "unknown"
-    probs = fake_probs / fake_probs.sum()
+    # ชื่อ input/output ของโมเดล
+    input_name = ort_session.get_inputs()[0].name
+    output_name = ort_session.get_outputs()[0].name
 
+    # รัน ONNX
+    logits = ort_session.run(
+        [output_name],
+        {input_name: input_tensor}
+    )[0]  # [1, num_classes]
+
+    # softmax -> probs
+    probs = softmax(logits)[0]  # [num_classes]
+
+    # หา class ที่คะแนนสูงสุด
     top_idx = int(np.argmax(probs))
     pred_class = CLASSES[top_idx]
     confidence = float(probs[top_idx])
 
-    # build topk list
+    # ถ้าความมั่นใจต่ำกว่า threshold -> บังคับ unknown
+    if pred_class != UNKNOWN_CLASS_NAME and confidence < UNKNOWN_THRESHOLD:
+        pred_class = UNKNOWN_CLASS_NAME
+
+    # top-k 3 อันดับ
     order = np.argsort(-probs)
-    topk = [(CLASSES[i], float(probs[i])) for i in order[:3]]
+    topk = []
+    for i in order[: min(3, len(CLASSES))]:
+        topk.append((CLASSES[i], float(probs[i])))
 
     end_t = time.time()
     timing_ms = (end_t - start_t) * 1000.0
@@ -175,57 +337,90 @@ def run_inference(pil_img: Image.Image):
         "timing_ms": timing_ms
     }
 
-# ========== HEADER / HERO ==========
+
+# =========================
+# UI เริ่มต้น ส่วนหัว
+# =========================
 st.markdown(
     """
     <div class="section-title">Identity Check AI</div>
     <div class="big-head">Real-time identity verification.<br>Private. Offline. Judge-ready.</div>
     <div class="sub-head">
-      Drop in an image, and we’ll tell you who it is – or flag as <b>Unknown</b>.
-      Runs locally on your device. No internet required.
+      ใส่ภาพใบหน้า แล้วระบบจะระบุว่าเป็นใคร หรือจัดเป็น <b>Unknown</b><br>
+      รันออฟไลน์ในเครื่องคุณ ความเป็นส่วนตัวสูง
     </div>
     """,
     unsafe_allow_html=True
 )
 
-# ========== INPUT TABS ==========
+# =========================
+# Sidebar: อัปโหลดโมเดล 3D
+# =========================
+with st.sidebar:
+    st.markdown(
+        "<div class='section-title'>3D Model (optional)</div>"
+        "<div class='sub-head' style='font-size:.8rem;'>"
+        "อัปโหลดไฟล์ .glb / .gltf เพื่อนำเสนอฮาร์ดแวร์/กล่องอุปกรณ์/หัวหุ่น ฯลฯ "
+        "จะแสดง viewer หมุนได้ข้างผลทำนาย"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    model3d_file = st.file_uploader(
+        "Upload 3D model (.glb / .gltf)",
+        type=["glb", "gltf"],
+        help="ไฟล์จะแสดงใน 3D viewer",
+        key="model3d_uploader"
+    )
+
+    model3d_bytes = None
+    if model3d_file is not None:
+        model3d_bytes = model3d_file.read()
+
+# =========================
+# Tabs สำหรับใส่รูป
+# =========================
 tabs = st.tabs(["📤 Upload Image", "📷 Live Camera"])
 
 with tabs[0]:
     uploaded_file = st.file_uploader(
-        "Upload a face image (JPG/PNG)",
+        "อัปโหลดรูปหน้า (JPG/PNG)",
         type=["jpg","jpeg","png"],
-        help="Clear frontal or near-frontal face works best."
+        help="หน้าเต็มหรือกึ่งหน้าตรงชัด ๆ จะดีที่สุด"
     )
 
 with tabs[1]:
-    st.write("Camera capture (optional demo)")
+    st.write("ถ่ายรูปจากกล้อง (ทดลอง)")
     cam_img = st.camera_input("Take a photo")
 
-# pick source priority: camera > upload
+# เลือก source: กล้องมาก่อน ถ้าไม่มีค่อยดูอัปโหลด
 img_source = None
 if tabs[1] and cam_img is not None:
     img_source = cam_img
 elif tabs[0] and uploaded_file is not None:
     img_source = uploaded_file
 
-# ========== RUN BUTTON ==========
+# =========================
+# ปุ่ม RUN
+# =========================
 col_run, _ = st.columns([1,3])
 with col_run:
     run_btn = st.button("🔍 Analyze Now", use_container_width=True)
 
-# ========== RESULT AREA ==========
+# =========================
+# โซนผลลัพธ์
+# =========================
 if run_btn:
     if img_source is None:
-        st.warning("Please provide an image first 🙏")
+        st.warning("กรุณาใส่รูปภาพก่อน 🙏")
     else:
-        # Read image bytes -> PIL
+        # แปลงไฟล์อัปโหลดเป็น PIL.Image
         if isinstance(img_source, io.BytesIO) or hasattr(img_source, "read"):
             pil_img = Image.open(img_source)
         else:
-            # camera_input returns UploadedFile too, so above should handle it.
             pil_img = Image.open(img_source)
 
+        # รันโมเดล
         result = run_inference(pil_img)
 
         pred_class = result["pred_class"]
@@ -233,23 +428,24 @@ if run_btn:
         timing_ms = result["timing_ms"]
         topk = result["topk"]
 
-        # Show preview + result card side by side
-        left, right = st.columns([1,1])
+        # ========= LAYOUT สองคอลัมน์: รูป+สรุป / โมเดล 3D =========
+        colA, colB = st.columns([1,1])
 
-        with left:
+        with colA:
+            # รูปอินพุต
             st.image(pil_img, caption="Input Image", use_column_width=True)
 
-        with right:
+            # การ์ดผลทำนาย
             st.markdown(
                 f"""
-                <div class="result-card">
+                <div class="result-card" style="margin-top:1rem;">
                     <div class="section-title">Prediction Result</div>
                     <div class="big-head" style="font-size:1.25rem;">
                         {pred_class if pred_class != "unknown" else "⚠ Unknown"}
                     </div>
                     <div class="sub-head" style="font-size:.8rem; margin-bottom:.5rem;">
-                        The system believes this is <b>{pred_class}</b>
-                        with confidence {confidence_pct:.2f}%.
+                        ระบบประเมินว่าเป็น <b>{pred_class}</b>
+                        ด้วยความมั่นใจ {confidence_pct:.2f}%.
                     </div>
 
                     <div class="metric-row">
@@ -271,7 +467,40 @@ if run_btn:
                 unsafe_allow_html=True
             )
 
-        # Top-K breakdown (helps convince judges we’re not guessing randomly)
+        with colB:
+            st.markdown(
+                """
+                <div class="section-title">3D Prototype</div>
+                <div class="sub-head" style="font-size:.8rem;margin-bottom:.5rem;">
+                    หมุน / ซูม โมเดลฮาร์ดแวร์หรือโครงสร้างอุปกรณ์ที่ใช้รัน AI
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            if model3d_bytes is not None:
+                render_3d_viewer(model3d_bytes, height=320)
+            else:
+                st.markdown(
+                    """
+                    <div style="
+                        background: rgba(255,255,255,0.03);
+                        border-radius: 12px;
+                        border:1px solid rgba(255,255,255,0.08);
+                        padding:1rem;
+                        font-size:.8rem;
+                        color:#9BA3B4;
+                        text-align:center;
+                        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+                    ">
+                        ยังไม่มีโมเดล 3D<br>
+                        อัปโหลดไฟล์ .glb หรือ .gltf ใน Sidebar
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+        # ========= Top-K breakdown =========
         st.markdown(
             """
             <div class="section-title" style="margin-top:2rem;">Confidence Breakdown</div>
@@ -318,9 +547,9 @@ st.markdown(
     """
     <div class="footer-card">
       <b>Why this matters</b><br>
-      • Fully offline → privacy & compliance<br>
-      • Real-time (<50ms on CPU in demo)<br>
-      • Rejects strangers with <span style="color:#4AD0FF;font-weight:500;">Unknown</span> label
+      • ออฟไลน์ทั้งหมด → privacy / compliance สูง<br>
+      • Real-time (~<50ms CPU demo)<br>
+      • ถ้าไม่ใช่ใครในระบบ เราจะติดป้าย <span style="color:#4AD0FF;font-weight:500;">Unknown</span>
     </div>
     """,
     unsafe_allow_html=True
