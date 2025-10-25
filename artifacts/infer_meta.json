@@ -1,0 +1,27 @@
+{
+  "known_classes": [
+    "Ai_ko",
+    "Nam_Fon",
+    "Rat_sa_mee"
+  ],
+  "class_to_idx_known": {
+    "Ai_ko": 0,
+    "Nam_Fon": 1,
+    "Rat_sa_mee": 2
+  },
+  "img_size": 448,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "emb_dim": 512,
+  "tau_default": 0.7,
+  "margin_rule": 0.2,
+  "note": "row i of prototypes.npy matches known_classes[i]"
+}
