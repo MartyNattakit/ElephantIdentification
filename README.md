@@ -1,2 +1,8 @@
 # AI Hackathon: Elephant Identification
-งานช้างถ้วยไก่ ทีมฟอร์มช้าง
+
+## Team: ฟอร์มช้าง
+
+## Competition Result: 
+- ### 🥈 Second Place
+- ### 🏅 Excellent System Design Award
+
