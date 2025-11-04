@@ -5,7 +5,11 @@
 - 🏅 **Excellent System Design Award**
 
 ## 👥 Team — ฟอร์มช้าง (FormChang)
-**Members:** Phatthanasak Kraiduang · Kanlayanawat School \n Nattakit Chantara-aree · SKR \n Thanapong Wanna · SKR
+
+**Members:**
+- Phatthanasak Kraiduang — Kanlayanawat School
+- Nattakit Chantara-aree — SKR
+- Thanapong Wanna — SKR
 
 ## 🔎 What is this?
 - **Goal:** Recognize **individual elephants** from photos (re-ID) for conservation & monitoring.
