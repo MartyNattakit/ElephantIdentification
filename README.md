@@ -9,7 +9,7 @@
 **Members:**
 - Phatthanasak Kraiduang — Kanlayanawat School
 - Nattakit Chantara-aree — SKR
-- Thanapong Wanna — SKR
+- Thanapong Wannatha — Kuchinarai School
 
 ## 🔎 What is this?
 - **Goal:** Recognize **individual elephants** from photos (re-ID) for conservation & monitoring.
