@@ -1,8 +1,8 @@
 # AI Hackathon: Elephant Identification
 
 ## 🏆 Competition Results
-- 🥈 **Second Place**
-- 🏅 **Excellent System Design Award**
+- 🥈 **First Runner-Up | Second Place**
+- 🏅 **Outstanding System Design Award**
 
 ## 👥 Team — ฟอร์มช้าง (FormChang)
 
