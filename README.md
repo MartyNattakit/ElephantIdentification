@@ -8,7 +8,7 @@
 
 **Members:**
 - Phatthanasak Kraiduang — Kanlayanawat School
-- Nattakit Chantara-aree — SKR
+- Nattakit Chantara-aree — Suankularbwittayalai Rangsit School
 - Thanapong Wannatha — Kuchinarai School
 
 ## 🔎 What is this?
